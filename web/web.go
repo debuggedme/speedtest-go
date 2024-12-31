@@ -18,10 +18,30 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/go-chi/render"
 	"github.com/pires/go-proxyproto"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/librespeed/speedtest/config"
 	"github.com/librespeed/speedtest/results"
+)
+
+var (
+	downloadedBytesCounter = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "speedtest_downloaded_bytes_total",
+			Help: "speedtest_downloaded_bytes_total",
+		},
+		[]string{"ip"},
+	)
+	uploadedBytesCounter = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "speedtest_uploaded_bytes_total",
+			Help: "speedtest_uploaded_bytes_total",
+		},
+		[]string{"ip"},
+	)
 )
 
 const (
@@ -69,8 +89,8 @@ func ListenAndServe(conf *config.Config) error {
 	r.HandleFunc(conf.BaseURL+"/backend/empty", empty)
 	r.Get(conf.BaseURL+"/garbage", garbage)
 	r.Get(conf.BaseURL+"/backend/garbage", garbage)
-	r.Get(conf.BaseURL+"/getIP", getIP)
-	r.Get(conf.BaseURL+"/backend/getIP", getIP)
+	r.Get(conf.BaseURL+"/getip", getIP)
+	r.Get(conf.BaseURL+"/backend/getip", getIP)
 	r.Get(conf.BaseURL+"/results", results.DrawPNG)
 	r.Get(conf.BaseURL+"/results/", results.DrawPNG)
 	r.Get(conf.BaseURL+"/backend/results", results.DrawPNG)
@@ -85,12 +105,14 @@ func ListenAndServe(conf *config.Config) error {
 	r.HandleFunc(conf.BaseURL+"/backend/empty.php", empty)
 	r.Get(conf.BaseURL+"/garbage.php", garbage)
 	r.Get(conf.BaseURL+"/backend/garbage.php", garbage)
-	r.Get(conf.BaseURL+"/getIP.php", getIP)
-	r.Get(conf.BaseURL+"/backend/getIP.php", getIP)
+	r.Get(conf.BaseURL+"/getip.php", getIP)
+	r.Get(conf.BaseURL+"/backend/getip.php", getIP)
 	r.Post(conf.BaseURL+"/results/telemetry.php", results.Record)
 	r.Post(conf.BaseURL+"/backend/results/telemetry.php", results.Record)
 	r.HandleFunc(conf.BaseURL+"/stats.php", results.Stats)
 	r.HandleFunc(conf.BaseURL+"/backend/stats.php", results.Stats)
+
+	r.Handle("/telemetry", promhttp.Handler())
 
 	go listenProxyProtocol(conf, r)
 
@@ -133,12 +155,19 @@ func pages(fs http.FileSystem, BaseURL string) http.HandlerFunc {
 }
 
 func empty(w http.ResponseWriter, r *http.Request) {
-	_, err := io.Copy(ioutil.Discard, r.Body)
+	uploadedBytes, err := io.Copy(ioutil.Discard, r.Body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	_ = r.Body.Close()
+
+	ipAddr, _, err := net.SplitHostPort(r.RemoteAddr)
+	terr, ok := err.(*net.AddrError)
+	if ok && terr.Err == "missing port in address" {
+		ipAddr = r.RemoteAddr
+	}
+	uploadedBytesCounter.WithLabelValues(ipAddr).Add(float64(uploadedBytes))
 
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
@@ -152,6 +181,12 @@ func garbage(w http.ResponseWriter, r *http.Request) {
 
 	// chunk size set to 4 by default
 	chunks := 4
+
+	ipAddr, _, err := net.SplitHostPort(r.RemoteAddr)
+	terr, ok := err.(*net.AddrError)
+	if ok && terr.Err == "missing port in address" {
+		ipAddr = r.RemoteAddr
+	}
 
 	ckSize := r.FormValue("ckSize")
 	if ckSize != "" {
@@ -169,12 +204,16 @@ func garbage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var totalBytes int64
 	for i := 0; i < chunks; i++ {
-		if _, err := w.Write(randomData); err != nil {
-			log.Errorf("Error writing back to client at chunk number %d: %s", i, err)
+		n, err := w.Write(randomData)
+		if err != nil {
+			// log.Errorf("Error writing back to client at chunk number %d: %s", i, err)
 			break
 		}
+		totalBytes += int64(n)
 	}
+	downloadedBytesCounter.WithLabelValues(ipAddr).Add(float64(totalBytes))
 }
 
 func getIP(w http.ResponseWriter, r *http.Request) {

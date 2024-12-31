@@ -7,21 +7,20 @@ import (
 	"image/color"
 	"image/draw"
 	"image/png"
-	"math/rand"
 	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
-	"time"
 
 	"github.com/go-chi/render"
 	"github.com/librespeed/speedtest/config"
 	"github.com/librespeed/speedtest/database"
-	"github.com/librespeed/speedtest/database/schema"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"github.com/golang/freetype"
 	"github.com/golang/freetype/truetype"
-	"github.com/oklog/ulid/v2"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/image/font"
 )
@@ -66,6 +65,23 @@ var (
 	colorISP                  = image.NewUniform(color.RGBA{40, 40, 40, 255})
 	colorWatermark            = image.NewUniform(color.RGBA{160, 160, 160, 255})
 	colorSeparator            = image.NewUniform(color.RGBA{192, 192, 192, 255})
+)
+
+var (
+	pingGauge = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "speedtest_ping_seconds",
+			Help: "Ping in seconds",
+		},
+		[]string{"ip"},
+	)
+	jitterGauge = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "speedtest_jitter_seconds",
+			Help: "Jitter in seconds",
+		},
+		[]string{"ip"},
+	)
 )
 
 type Result struct {
@@ -151,60 +167,69 @@ func Record(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ipAddr, _, _ := net.SplitHostPort(r.RemoteAddr)
-	userAgent := r.UserAgent()
-	language := r.Header.Get("Accept-Language")
+	ipAddr, _, err := net.SplitHostPort(r.RemoteAddr)
+	terr, ok := err.(*net.AddrError)
+	if ok && terr.Err == "missing port in address" {
+		ipAddr = r.RemoteAddr
+	}
+	// userAgent := r.UserAgent()
+	// language := r.Header.Get("Accept-Language")
 
-	ispInfo := r.FormValue("ispinfo")
-	download := r.FormValue("dl")
-	upload := r.FormValue("ul")
+	// ispInfo := r.FormValue("ispinfo")
+	// download := r.FormValue("dl")
+	// upload := r.FormValue("ul")
 	ping := r.FormValue("ping")
 	jitter := r.FormValue("jitter")
-	logs := r.FormValue("log")
-	extra := r.FormValue("extra")
+	// logs := r.FormValue("log")
+	// extra := r.FormValue("extra")
 
-	if config.LoadedConfig().RedactIP {
-		ipAddr = "0.0.0.0"
-		ipv4Regex.ReplaceAllString(ispInfo, "0.0.0.0")
-		ipv4Regex.ReplaceAllString(logs, "0.0.0.0")
-		ipv6Regex.ReplaceAllString(ispInfo, "0.0.0.0")
-		ipv6Regex.ReplaceAllString(logs, "0.0.0.0")
-		hostnameRegex.ReplaceAllString(ispInfo, `"hostname":"REDACTED"`)
-		hostnameRegex.ReplaceAllString(logs, `"hostname":"REDACTED"`)
-	}
+	pingValue, _ := strconv.ParseFloat(ping, 64)
+	jitterValue, _ := strconv.ParseFloat(jitter, 64)
+	pingGauge.WithLabelValues(ipAddr).Set(pingValue / 1000)
+	jitterGauge.WithLabelValues(ipAddr).Set(jitterValue / 1000)
 
-	var record schema.TelemetryData
-	record.IPAddress = ipAddr
-	if ispInfo == "" {
-		record.ISPInfo = "{}"
-	} else {
-		record.ISPInfo = ispInfo
-	}
-	record.Extra = extra
-	record.UserAgent = userAgent
-	record.Language = language
-	record.Download = download
-	record.Upload = upload
-	record.Ping = ping
-	record.Jitter = jitter
-	record.Log = logs
+	// if config.LoadedConfig().RedactIP {
+	// 	ipAddr = "0.0.0.0"
+	// 	ipv4Regex.ReplaceAllString(ispInfo, "0.0.0.0")
+	// 	ipv4Regex.ReplaceAllString(logs, "0.0.0.0")
+	// 	ipv6Regex.ReplaceAllString(ispInfo, "0.0.0.0")
+	// 	ipv6Regex.ReplaceAllString(logs, "0.0.0.0")
+	// 	hostnameRegex.ReplaceAllString(ispInfo, `"hostname":"REDACTED"`)
+	// 	hostnameRegex.ReplaceAllString(logs, `"hostname":"REDACTED"`)
+	// }
 
-	t := time.Now()
-	entropy := ulid.Monotonic(rand.New(rand.NewSource(t.UnixNano())), 0)
-	uuid := ulid.MustNew(ulid.Timestamp(t), entropy)
-	record.UUID = uuid.String()
+	// var record schema.TelemetryData
+	// record.IPAddress = ipAddr
+	// if ispInfo == "" {
+	// 	record.ISPInfo = "{}"
+	// } else {
+	// 	record.ISPInfo = ispInfo
+	// }
+	// record.Extra = extra
+	// record.UserAgent = userAgent
+	// record.Language = language
+	// record.Download = download
+	// record.Upload = upload
+	// record.Ping = ping
+	// record.Jitter = jitter
+	// record.Log = logs
 
-	err := database.DB.Insert(&record)
-	if err != nil {
-		log.Errorf("Error inserting into database: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
+	// t := time.Now()
+	// entropy := ulid.Monotonic(rand.New(rand.NewSource(t.UnixNano())), 0)
+	// uuid := ulid.MustNew(ulid.Timestamp(t), entropy)
+	// record.UUID = uuid.String()
 
-	if _, err := w.Write([]byte("id " + uuid.String())); err != nil {
-		log.Errorf("Error writing ID to telemetry request: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-	}
+	// err := database.DB.Insert(&record)
+	// if err != nil {
+	// 	log.Errorf("Error inserting into database: %s", err)
+	// 	w.WriteHeader(http.StatusInternalServerError)
+	// 	return
+	// }
+
+	// if _, err := w.Write([]byte("id " + uuid.String())); err != nil {
+	// 	log.Errorf("Error writing ID to telemetry request: %s", err)
+	// 	w.WriteHeader(http.StatusInternalServerError)
+	// }
 }
 
 func DrawPNG(w http.ResponseWriter, r *http.Request) {
