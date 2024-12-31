@@ -155,7 +155,7 @@ func pages(fs http.FileSystem, BaseURL string) http.HandlerFunc {
 }
 
 func empty(w http.ResponseWriter, r *http.Request) {
-	uploadedBytes, err := io.Copy(ioutil.Discard, r.Body)
+	_, err := io.Copy(ioutil.Discard, r.Body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -167,7 +167,7 @@ func empty(w http.ResponseWriter, r *http.Request) {
 	if ok && terr.Err == "missing port in address" {
 		ipAddr = r.RemoteAddr
 	}
-	uploadedBytesCounter.WithLabelValues(ipAddr).Add(float64(uploadedBytes))
+	uploadedBytesCounter.WithLabelValues(ipAddr).Add(float64(r.ContentLength))
 
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
